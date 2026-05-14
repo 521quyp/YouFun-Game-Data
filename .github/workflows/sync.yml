@@ -1,0 +1,58 @@
+name: YouFun_Data_Daily_Sync
+
+# 自动运行触发器
+on:
+  schedule:
+    # 每天北京时间上午 10:00 运行 (UTC 2:00)
+    - cron: '0 2 * * *'
+  # 允许手动点击按钮触发
+  workflow_dispatch:
+
+# 任务定义
+jobs:
+  build_and_sync:
+    runs-on: ubuntu-latest
+    
+    # 设置运行超时时间为 6 小时（防止意外挂起）
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. 获取仓库代码
+        uses: actions/checkout@v3
+
+      - name: 2. 安装 Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: 3. 安装依赖库
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests aiohttp aiomysql aiofiles oss2 pymysql
+
+      - name: 4. 执行数据同步脚本
+        # 核心：将 GitHub 保险箱里的密钥注入到环境变量
+        env:
+          REMOTE_TOKEN: ${{ secrets.REMOTE_TOKEN }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          # 告诉 Python 运行在自动化环境，不进入交互模式
+          PYTHONUNBUFFERED: 1
+        run: |
+          # 启动你的主控脚本
+          python main_start.py
+
+      - name: 5. 任务失败提醒 (可选)
+        if: failure()
+        run: |
+          echo "任务运行失败，请检查 Actions 日志输出。"
+
+      - name: 6. 保存运行日志
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: youfun-sync-logs-${{ github.run_id }}
+          path: |
+            log/
+            tmp/*.json
+          retention-days: 7
