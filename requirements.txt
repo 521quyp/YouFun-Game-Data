@@ -1,0 +1,6 @@
+aiohttp
+aiomysql
+aiofiles
+oss2
+pymysql
+requests
