@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import aiohttp
 import aiomysql
 import time
@@ -72,14 +72,14 @@ PLATFORMS = {
 }
 
 # =======================
-# SQL 模板 (已新增 is_exclusive 字段)
+# SQL 模板 (已新增 plus_catalog 字段)
 # =======================
 INSERT_LIST_SQL = """
 INSERT INTO games_on_sale
 (game_id, name, chinese_name, category, has_chinese, rating, discount_start_time, discount_end_time,
  original_price, discount_price, lowest_price, country, cover, popularity, platform,
- is_discount, is_popular, is_high_rating, is_free_plus, is_new_release, is_coming_soon, is_exclusive)
-VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+ is_discount, is_popular, is_high_rating, is_free_plus, is_new_release, is_coming_soon, is_exclusive, plus_catalog)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 ON DUPLICATE KEY UPDATE
     chinese_name=VALUES(chinese_name),
     category=VALUES(category),
@@ -98,7 +98,8 @@ ON DUPLICATE KEY UPDATE
     is_free_plus=GREATEST(is_free_plus, VALUES(is_free_plus)),
     is_new_release=GREATEST(is_new_release, VALUES(is_new_release)),
     is_coming_soon=GREATEST(is_coming_soon, VALUES(is_coming_soon)),
-    is_exclusive=VALUES(is_exclusive)
+    is_exclusive=VALUES(is_exclusive),
+    plus_catalog=GREATEST(plus_catalog, VALUES(plus_catalog))
 """
 
 def parse_chinese_field(c) -> str:
@@ -161,7 +162,7 @@ class DBPool:
                     category = json.dumps(item.get("category", []), ensure_ascii=False)
                     has_chinese = json.dumps(item.get("chinese", {}), ensure_ascii=False)
                     
-                    # --- 标签逻辑 (保持原有逻辑) ---
+                    # --- 标签逻辑 ---
                     is_discount = 1 if tag == "优惠促销" else 0
                     is_popular = 1 if tag == "正在流行" else 0
                     is_high_rating = 1 if tag == "高分神作" else 0
@@ -169,16 +170,23 @@ class DBPool:
                     is_new_release = 1 if tag == "最新上架" else 0
                     is_coming_soon = 1 if tag == "即将推出" else 0
 
-                    # --- 核心修改：处理独占字段 exclusive ---
+                    # --- 处理独占字段 exclusive ---
                     if platform == "steam":
                         is_exclusive = 0
-                    # 关键点：如果 tag 是“独占游戏”，强制设为 1
                     elif tag == "独占游戏":
                         is_exclusive = 1
                     else:
-                        # 兜底逻辑：如果其他路由里接口刚好返回了 true，也记录下来
                         raw_exclusive = item.get("exclusive")
                         is_exclusive = 1 if (raw_exclusive is True or str(raw_exclusive).lower() == "true") else 0
+
+                    # --- 核心修改：处理新增的 plus_catalog 字段 ---
+                    if platform in ("ps4", "ps5"):
+                        raw_catalog = item.get("plus_catalog")
+                        # 只有明确为 True 或字符串 "true" 时记为 1，其余 (False/None/Null) 记为 0
+                        is_catalog = 1 if (raw_catalog is True or str(raw_catalog).lower() == "true") else 0
+                    else:
+                        # ns(switch) 和 steam 强制存 0
+                        is_catalog = 0
 
                     try:
                         await cur.execute(INSERT_LIST_SQL, (
@@ -188,7 +196,7 @@ class DBPool:
                             int(bool(item.get("lowest_price", False))),
                             item.get("country"), cover, item.get("popularity"), platform,
                             is_discount, is_popular, is_high_rating, is_free_plus, 
-                            is_new_release, is_coming_soon, is_exclusive
+                            is_new_release, is_coming_soon, is_exclusive, is_catalog
                         ))
                         saved += 1
                     except Exception as e:
