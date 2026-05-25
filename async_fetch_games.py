@@ -20,8 +20,17 @@ DB_CONFIG = {
 
 REQUEST_TIMEOUT = 15
 RETRY_TIMES = 3
-CONCURRENT_REQUESTS = 3  # 限制并发，配合唯一索引预防 Deadlock
-SLEEP_BETWEEN_PAGES = 0.5
+
+# =======================
+# 速度控制配置（核心修改点）
+# =======================
+# 1. 严格限制全局最大并发请求数为 1 
+GLOBAL_CONCURRENT_LIMIT = 1  
+# 2. 页面抓取后的基础休眠时间（秒）
+SLEEP_BASE = 1.5  
+# 3. 页面抓取后的随机额外休眠时间最大值（秒），配合基础时间形成 1.5s ~ 3.0s 的随机间隔
+SLEEP_RANDOM_MAX = 1.5  
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 # =======================
@@ -31,13 +40,9 @@ PLATFORMS = {
     "switch": [
         {"url": "https://mpapi.yyouren.com/onsale", "params": {"limit": 10, "offset": 0, "sort": "popular", "discount_start": 0, "discount_end": 500}, "tag": "优惠促销"},
         {"url": "https://mpapi.yyouren.com/onsale", "params": {"limit": 10, "offset": 0, "sort": "popular", "discount_start": 0, "discount_end": 500, "exclusive": "true"}, "tag": "独占游戏"},
-        
         {"url": "https://mpapi.yyouren.com/onsale", "params": {"limit": 10, "offset": 0, "sort": "popular", "discount": "false"}, "tag": "正在流行"},
-        
         {"url": "https://mpapi.yyouren.com/onsale", "params": {"limit": 10, "offset": 0, "sort": "rating", "discount": "false"}, "tag": "高分神作"},
-        
         {"url": "https://mpapi.yyouren.com/onsale", "params": {"limit": 10, "offset": 0, "sort": "release_date", "new_release": "true", "discount": "false"}, "tag": "最新上架"},
-        
         {"url": "https://mpapi.yyouren.com/onsale", "params": {"limit": 10, "offset": 0, "sort": "release_date", "coming_soon": "true", "discount": "false"}, "tag": "即将推出"},
     ],
     "steam": [
@@ -50,30 +55,20 @@ PLATFORMS = {
     "ps4": [
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS4", "tag": "优惠促销", "sort": "popular"}, "tag": "优惠促销"},
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS4", "tag": "优惠促销", "sort": "popular", "exclusive": "true"}, "tag": "独占游戏"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS4", "tag": "Plus会免", "screen": "extra"}, "tag": "Plus会免"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS4", "tag": "正在流行"}, "tag": "正在流行"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS4", "tag": "高分神作", "screen": "metacritic"}, "tag": "高分神作"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS4", "tag": "最新上架"}, "tag": "最新上架"},
     ],
     "ps5": [
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS5", "tag": "优惠促销", "sort": "popular"}, "tag": "优惠促销"},
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS5", "tag": "优惠促销", "sort": "popular", "exclusive": "true"}, "tag": "独占游戏"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS5", "tag": "正在流行"}, "tag": "正在流行"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS5", "tag": "高分神作", "screen": "metacritic"}, "tag": "高分神作"},
-        
         {"url": "https://mpapi.yyouren.com/ps/onsale", "params": {"limit": 10, "offset": 0, "platform": "PS5", "tag": "最新上架"}, "tag": "最新上架"},
     ]
 }
 
-# =======================
-# SQL 模板 (已新增 plus_catalog 字段)
-# =======================
 INSERT_LIST_SQL = """
 INSERT INTO games_on_sale
 (game_id, name, chinese_name, category, has_chinese, rating, discount_start_time, discount_end_time,
@@ -116,11 +111,14 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict = No
     while tries < retries:
         try:
             async with session.get(url, params=params, timeout=REQUEST_TIMEOUT) as resp:
+                if resp.status == 429:  # 对方提示 Too Many Requests
+                    print(f"⚠️ 触发频率限制(429)，将进行超长等待...")
+                    await asyncio.sleep(10 + random.random() * 5)
                 resp.raise_for_status()
                 return await resp.json()
         except Exception as e:
             tries += 1
-            backoff = 0.5 * (2 ** (tries - 1)) + random.random() * 0.5
+            backoff = 2.0 * (2 ** (tries - 1)) + random.random() * 1.0  # 增加了重试的退避时间
             print(f"⚠️ HTTP 错误 try={tries}/{retries} url={url} err={e}")
             await asyncio.sleep(backoff)
     return None
@@ -148,7 +146,6 @@ class DBPool:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 for item in rows:
-                    # --- 核心数据清洗 ---
                     name = str(item.get("name", "")).strip()
                     cover = str(item.get("cover", "")).strip()
                     if not name: continue 
@@ -162,7 +159,6 @@ class DBPool:
                     category = json.dumps(item.get("category", []), ensure_ascii=False)
                     has_chinese = json.dumps(item.get("chinese", {}), ensure_ascii=False)
                     
-                    # --- 标签逻辑 ---
                     is_discount = 1 if tag == "优惠促销" else 0
                     is_popular = 1 if tag == "正在流行" else 0
                     is_high_rating = 1 if tag == "高分神作" else 0
@@ -170,7 +166,6 @@ class DBPool:
                     is_new_release = 1 if tag == "最新上架" else 0
                     is_coming_soon = 1 if tag == "即将推出" else 0
 
-                    # --- 处理独占字段 exclusive ---
                     if platform == "steam":
                         is_exclusive = 0
                     elif tag == "独占游戏":
@@ -179,13 +174,10 @@ class DBPool:
                         raw_exclusive = item.get("exclusive")
                         is_exclusive = 1 if (raw_exclusive is True or str(raw_exclusive).lower() == "true") else 0
 
-                    # --- 核心修改：处理新增的 plus_catalog 字段 ---
                     if platform in ("ps4", "ps5"):
                         raw_catalog = item.get("plus_catalog")
-                        # 只有明确为 True 或字符串 "true" 时记为 1，其余 (False/None/Null) 记为 0
                         is_catalog = 1 if (raw_catalog is True or str(raw_catalog).lower() == "true") else 0
                     else:
-                        # ns(switch) 和 steam 强制存 0
                         is_catalog = 0
 
                     try:
@@ -200,43 +192,51 @@ class DBPool:
                         ))
                         saved += 1
                     except Exception as e:
-                        if "1213" in str(e): # Deadlock retry
+                        if "1213" in str(e): 
                             await asyncio.sleep(random.random())
                         else:
                             print(f"⚠️ 保存列表失败 {name} err={e}")
         return saved
 
-async def process_platform(session, dbpool, platform, urls):
+async def process_platform(session, dbpool, platform, urls, sem):
     total_saved = 0
-    sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
     async def fetch_task(u):
         nonlocal total_saved
-        async with sem:
-            url = u["url"]
-            base_params = u["params"].copy()
-            limit = int(base_params.get("limit", 10))
-            offset = int(base_params.get("offset", 0))
-            tag = u.get("tag", "")
+        url = u["url"]
+        base_params = u["params"].copy()
+        limit = int(base_params.get("limit", 10))
+        offset = int(base_params.get("offset", 0))
+        tag = u.get("tag", "")
 
-            while True:
-                params = base_params.copy()
-                params["offset"] = offset
+        while True:
+            params = base_params.copy()
+            params["offset"] = offset
+            
+            # 使用全局信号量，确保这一瞬间全程序只有指定数量的请求在发往服务器
+            async with sem:
                 resp = await fetch_json(session, url, params=params)
-                if not resp: break
+            
+            if not resp: break
 
-                data_rows = resp.get("data", {}).get("result", []) or []
-                if not data_rows: break
+            data_rows = resp.get("data", {}).get("result", []) or []
+            if not data_rows: break
 
-                saved = await dbpool.save_list_rows(data_rows, platform, tag)
-                total_saved += saved
-                
-                total = int(resp.get("data", {}).get("total", 0) or 0)
-                offset += limit
-                if offset >= total: break
-                await asyncio.sleep(SLEEP_BETWEEN_PAGES)
+            saved = await dbpool.save_list_rows(data_rows, platform, tag)
+            total_saved += saved
+            
+            total = int(resp.get("data", {}).get("total", 0) or 0)
+            offset += limit
+            if offset >= total: break
+            
+            # 核心修改：增加随机休眠，使请求频率不可预测，降低被封几率
+            sleep_time = SLEEP_BASE + random.random() * SLEEP_RANDOM_MAX
+            await asyncio.sleep(sleep_time)
 
-    await asyncio.gather(*(fetch_task(u) for u in urls))
+    # 每个平台内部的各类标签（如优惠、独占）也改为串行（一个接一个跑），进一步压低并发
+    for u in urls:
+        await fetch_task(u)
+        
     return total_saved
 
 async def main():
@@ -244,11 +244,21 @@ async def main():
     await dbpool.init_pool()
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
     
+    # 创建全局统一的并发控制器
+    global_sem = asyncio.Semaphore(GLOBAL_CONCURRENT_LIMIT)
+    
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # 设置全局 User-Agent
         session._default_headers.update({"User-Agent": USER_AGENT})
-        tasks = [process_platform(session, dbpool, plat, u) for plat, u in PLATFORMS.items()]
-        results = await asyncio.gather(*tasks)
+        
+        # 将原先的 asyncio.gather 全并发改为「串行遍历平台」
+        # 这样能极大缓解同一时刻对对方服务器同一接口造成的压力
+        results = []
+        for plat, u in PLATFORMS.items():
+            print(f"🚀 开始抓取平台: {plat}...")
+            res = await process_platform(session, dbpool, plat, u, global_sem)
+            results.append(res)
+            # 平台与平台切换之间，也歇一口气
+            await asyncio.sleep(3)
 
     await dbpool.close()
     print(f"\n✅ 全部抓取完毕，总计更新条数：{sum(results)}")
