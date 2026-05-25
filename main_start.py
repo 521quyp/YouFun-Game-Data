@@ -6,10 +6,10 @@ import requests  # 🚀 新增：需要执行 pip install requests
 # ================= 配置区 =================
 SCRIPTS = [
     "async_fetch_games.py",
-    "async_ps_details.py",
-    "async_steam_details.py",
-    "async_switch_details.py",
-    "async_oss_upload.py"
+    # "async_ps_details.py",
+    # "async_steam_details.py",
+    # "async_switch_details.py",
+    # "async_oss_upload.py"
 ]
 
 # 服务器接口配置
